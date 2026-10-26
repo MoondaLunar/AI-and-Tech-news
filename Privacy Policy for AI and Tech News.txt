@@ -1,0 +1,9 @@
+Privacy Policy for AI and Tech News Bot
+
+Data Collection: This bot does not collect, store, or transmit any personal user data. It only reads public commands issued by users (e.g., /ai_news) and responds with publicly available information scraped from official company blogs (OpenAI, Anthropic, Proton, etc.).
+
+Data Usage: No data is used for advertising, profiling, or third-party sharing.
+
+Data Retention: No data is retained on any server. All processing happens in real-time and is discarded immediately after the response is sent.
+
+Contact: For questions, contact catgirlsara01@proton.me
