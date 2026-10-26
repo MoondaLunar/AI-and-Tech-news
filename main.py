@@ -8,7 +8,6 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
-from urllib import response
 from urllib.parse import urljoin
 from xml.etree import ElementTree
 
@@ -20,6 +19,7 @@ from discord.ext import commands
 from dotenv import load_dotenv
 
 from bot import SOURCES
+from brave_client import BraveClient, canonical_url
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(name)s | %(message)s")
 logger = logging.getLogger("ai_tech_news")
@@ -28,6 +28,11 @@ TOKEN = os.getenv("DISCORD_TOKEN")
 DEV_GUILD_ID = os.getenv("DEV_GUILD_ID")
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5.6")
+BRAVE_SEARCH_API_KEY = os.getenv("BRAVE_SEARCH_API_KEY")
+BRAVE_QUERY = os.getenv("BRAVE_NEWS_QUERY", "artificial intelligence technology research announcements")
+BRAVE_FRESHNESS = os.getenv("BRAVE_FRESHNESS", "pw")
+BRAVE_RESULT_COUNT = max(1, min(int(os.getenv("BRAVE_RESULT_COUNT", "3")), 10))
+brave = BraveClient(BRAVE_SEARCH_API_KEY) if BRAVE_SEARCH_API_KEY else None
 CACHE_PATH = Path(__file__).with_name("news_cache.sqlite3")
 CACHE_TTL_SECONDS = 24 * 60 * 60
 SUMMARY_SEMAPHORE = asyncio.Semaphore(1)
@@ -46,6 +51,7 @@ class NewsItem:
     error: Optional[str] = None
     summary: Optional[str] = None
     summary_stage: Optional[str] = None
+    discovery: str = "official"
 
 
 @dataclass
@@ -261,6 +267,13 @@ async def add_summary(item: NewsItem) -> NewsItem:
         item.url,
         extraction.detail,
     )
+    if not extraction.text and brave is not None:
+        try:
+            context = await brave.context_for(item.title, item.url)
+            if context:
+                extraction = ArticleTextResult(context, "brave_context_success", "Retrieved article-matched context from Brave.")
+        except (httpx.HTTPError, ValueError, RuntimeError) as error:
+            logger.warning("Brave context unavailable: %s", type(error).__name__)
     if not extraction.text:
         item.summary_stage = extraction.stage
         item.summary = f"Article extraction failed (`{extraction.stage}`). {extraction.detail}"
@@ -282,6 +295,24 @@ async def add_summary(item: NewsItem) -> NewsItem:
     else:
         item.summary = f"AI summary generation failed (`{generated.stage}`). {generated.detail}"
     return item
+
+
+async def discover_brave_news() -> list[NewsItem]:
+    if brave is None:
+        return []
+    try:
+        hits = await brave.discover(BRAVE_QUERY, count=BRAVE_RESULT_COUNT, freshness=BRAVE_FRESHNESS)
+    except (httpx.HTTPError, ValueError, RuntimeError) as error:
+        logger.warning("Brave discovery unavailable: %s", type(error).__name__)
+        return []
+    seen = set()
+    items = []
+    for hit in hits:
+        key = canonical_url(hit.url)
+        if key and key not in seen:
+            seen.add(key)
+            items.append(NewsItem("Brave discovery", hit.title, hit.url, discovery="brave"))
+    return items
 
 
 def news_embed(item: NewsItem) -> discord.Embed:
@@ -313,9 +344,17 @@ async def ai_news(interaction: discord.Interaction, company: Optional[str] = Non
     if company:
         await interaction.followup.send(embed=news_embed(await add_summary(await fetch_latest(company))))
         return
-    items = await asyncio.gather(*(fetch_latest(key) for key in SOURCES))
+    official = await asyncio.gather(*(fetch_latest(key) for key in SOURCES))
+    discovered = await discover_brave_news()
+    seen = {canonical_url(item.url) for item in official if item.url}
+    items = list(official)
+    for item in discovered:
+        key = canonical_url(item.url)
+        if key and key not in seen:
+            seen.add(key)
+            items.append(item)
     items = await asyncio.gather(*(add_summary(item) for item in items))
-    await interaction.followup.send("Here are the latest items from the sources I track:")
+    await interaction.followup.send("Here are the latest official announcements and optional Brave-discovered stories:")
     for item in items:
         await interaction.followup.send(embed=news_embed(item))
 
@@ -329,7 +368,7 @@ async def sources(interaction: discord.Interaction) -> None:
 @bot.tree.command(name="status", description="Check whether the bot is online and configured.")
 async def status(interaction: discord.Interaction) -> None:
     mode = "development-server sync" if DEV_GUILD_ID else "global sync"
-    await interaction.response.send_message(f"✅ Online. Tracking {len(SOURCES)} sources. Command mode: {mode}.", ephemeral=True)
+    await interaction.response.send_message(f"✅ Online. Tracking {len(SOURCES)} official sources. Brave discovery: {'enabled' if brave else 'disabled'}. Command mode: {mode}.", ephemeral=True)
 
 
 @bot.tree.command(name="help", description="Learn how to use AI & Tech News.")
